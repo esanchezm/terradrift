@@ -1,0 +1,66 @@
+# This is the configuration file for goreleaser.
+# Full documentation: https://goreleaser.com/customization/
+
+version: 2
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: terradrift
+    binary: terradrift
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: .
+    flags:
+      - -trimpath
+
+archives:
+  - id: default
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  id: default
+  algorithm: sha256
+  template: |
+    ## Checksums
+
+    {{ range .Artifacts }}{{ .Type | title }}: `{{ .Name }}`
+    {{ .MD5 }}  {{ .Name }}
+    {{ end }}
+
+signs:
+  - id: oss
+    cmd: gpg
+    args:
+      - --batch
+      - --yes
+      - --armor
+      - --detach-sign
+      - --local-user
+      - "{{ .env.GPG_FINGERPRINT }}"
+      - ${artifact}
+    artifacts: all
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
