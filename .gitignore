@@ -19,6 +19,7 @@ dist/
 *.swp
 *.swo
 *~
+.omc
 
 # OS
 .DS_Store
