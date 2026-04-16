@@ -1,19 +1,19 @@
 // Package state handles loading and parsing infrastructure state.
 package state
 
-// ResourceState represents the state of an infrastructure resource.
-type ResourceState struct {
-	ID         string
-	Type       string
-	Name       string
-	Attributes map[string]interface{}
-}
+import (
+	"context"
 
-// StateLoader defines the interface for loading infrastructure state.
-type StateLoader interface {
-	// Load loads the state from a given path or configuration.
-	Load(path string) ([]ResourceState, error)
+	"github.com/esanchezm/terradrift/internal/core"
+)
 
-	// Type returns the type of state loader (e.g., "terraform", "pulumi").
-	Type() string
+// StateReader defines the interface for reading infrastructure state.
+// Implementations are responsible for fetching the current state of resources
+// from a storage backend or file.
+type StateReader interface {
+	// Resources returns the resources currently present in the state.
+	Resources(ctx context.Context) ([]core.Resource, error)
+
+	// Source returns the source of the state (e.g., a file path or URL).
+	Source() string
 }

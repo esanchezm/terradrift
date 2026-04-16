@@ -1,22 +1,22 @@
 // Package provider defines the interface for cloud provider interactions.
 package provider
 
-// Resource represents a cloud resource.
-type Resource struct {
-	ID         string
-	Type       string
-	Name       string
-	Attributes map[string]interface{}
-}
+import (
+	"context"
+
+	"github.com/esanchezm/terradrift/internal/core"
+)
 
 // Provider defines the interface for interacting with cloud providers.
+// It is responsible for discovering and describing cloud resources.
 type Provider interface {
-	// ListResources returns all resources for the provider.
-	ListResources() ([]Resource, error)
-
-	// GetResource returns a specific resource by ID.
-	GetResource(id string) (*Resource, error)
-
 	// Name returns the provider name (e.g., "aws", "gcp", "azure").
 	Name() string
+
+	// Resources returns the resources of the specified types.
+	// If types is empty, all supported resource types are returned.
+	Resources(ctx context.Context, types []string) ([]core.Resource, error)
+
+	// SupportedTypes returns the list of resource types this provider can manage.
+	SupportedTypes() []string
 }
