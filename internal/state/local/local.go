@@ -3,35 +3,13 @@ package local
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/esanchezm/terradrift/internal/core"
+	"github.com/esanchezm/terradrift/internal/state"
 )
-
-// tfState represents the top-level structure of a Terraform v4 state file.
-type tfState struct {
-	Version   int          `json:"version"`
-	Resources []tfResource `json:"resources"`
-}
-
-// tfResource represents a single resource block in the state.
-type tfResource struct {
-	Mode      string       `json:"mode"`
-	Type      string       `json:"type"`
-	Name      string       `json:"name"`
-	Provider  string       `json:"provider"`
-	Instances []tfInstance `json:"instances"`
-}
-
-// tfInstance represents one instance of a resource (there can be multiple
-// when count or for_each is used).
-type tfInstance struct {
-	Attributes map[string]interface{} `json:"attributes"`
-}
 
 // Reader implements state.StateReader for local .tfstate files discovered
 // via a filesystem glob pattern.
@@ -47,7 +25,7 @@ func New(pattern string) *Reader {
 
 // Resources returns all managed resources found across every state file that
 // matches the configured glob pattern. Data sources (mode "data") are
-// excluded. If no files match the pattern, an empty slice is returned.
+// excluded. If no files match the pattern, nil is returned.
 func (r *Reader) Resources(ctx context.Context) ([]core.Resource, error) {
 	matches, err := filepath.Glob(r.pattern)
 	if err != nil {
@@ -88,47 +66,5 @@ func parseFile(path string) ([]core.Resource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading file: %w", err)
 	}
-
-	var s tfState
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("decoding JSON: %w", err)
-	}
-
-	var resources []core.Resource
-	for _, res := range s.Resources {
-		if res.Mode != "managed" {
-			continue
-		}
-
-		provider := extractProvider(res.Provider)
-
-		for _, inst := range res.Instances {
-			id, _ := inst.Attributes["id"].(string)
-
-			resources = append(resources, core.Resource{
-				ID:       id,
-				Type:     res.Type,
-				Name:     res.Name,
-				Provider: provider,
-				Data:     inst.Attributes,
-			})
-		}
-	}
-
-	return resources, nil
-}
-
-// extractProvider extracts the short provider name from a Terraform provider
-// string. For example:
-//
-//	"provider[\"registry.terraform.io/hashicorp/aws\"]" -> "aws"
-func extractProvider(raw string) string {
-	raw = strings.TrimPrefix(raw, `provider["`)
-	raw = strings.TrimSuffix(raw, `"]`)
-
-	if idx := strings.LastIndex(raw, "/"); idx != -1 {
-		return raw[idx+1:]
-	}
-
-	return raw
+	return state.ParseState(data)
 }

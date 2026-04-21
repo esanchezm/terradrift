@@ -121,25 +121,6 @@ func TestSource(t *testing.T) {
 	}
 }
 
-func TestExtractProvider(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{`provider["registry.terraform.io/hashicorp/aws"]`, "aws"},
-		{`provider["registry.terraform.io/hashicorp/google"]`, "google"},
-		{`provider["registry.terraform.io/hashicorp/azurerm"]`, "azurerm"},
-		{"aws", "aws"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		if got := extractProvider(tt.input); got != tt.want {
-			t.Errorf("extractProvider(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func findResource(resources []core.Resource, typ, name string) *core.Resource {
 	for i := range resources {
 		if resources[i].Type == typ && resources[i].Name == name {

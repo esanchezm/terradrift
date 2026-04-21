@@ -27,3 +27,6 @@ Thumbs.db
 
 # Go
 /vendor/
+
+# Runtime cache for remote state readers
+.terradrift-cache/
