@@ -12,17 +12,17 @@ import (
 	"github.com/esanchezm/terradrift/internal/provider"
 )
 
-// ResourceTypeEC2 is the resource type for EC2 instances.
-const ResourceTypeEC2 = "aws_instance"
+const (
+	ResourceTypeEC2            = "aws_instance"
+	ResourceTypeS3Bucket      = "aws_s3_bucket"
+	ResourceTypeSecurityGroup = "aws_security_group"
+)
 
-// ResourceTypeS3Bucket is the resource type for S3 buckets.
-const ResourceTypeS3Bucket = "aws_s3_bucket"
-
-// Provider implements the provider.Provider interface for AWS.
 type Provider struct {
 	region    string
 	ec2Client *ec2.Client
 	s3Client  *s3.Client
+	sgClient  securityGroupAPI
 }
 
 // New creates a new AWS provider with the specified region.
@@ -44,11 +44,13 @@ func New(ctx context.Context, region string) (*Provider, error) {
 
 	ec2Client := ec2.NewFromConfig(cfg)
 	s3Client := s3.NewFromConfig(cfg)
+	sgClient := ec2.NewFromConfig(cfg)
 
 	return &Provider{
 		region:    region,
 		ec2Client: ec2Client,
 		s3Client:  s3Client,
+		sgClient:  sgClient,
 	}, nil
 }
 
@@ -59,7 +61,7 @@ func (p *Provider) Name() string {
 
 // SupportedTypes returns the supported resource types.
 func (p *Provider) SupportedTypes() []string {
-	return []string{ResourceTypeEC2, ResourceTypeS3Bucket}
+	return []string{ResourceTypeEC2, ResourceTypeS3Bucket, ResourceTypeSecurityGroup}
 }
 
 // Resources returns the resources of the specified types.
@@ -85,6 +87,12 @@ func (p *Provider) Resources(ctx context.Context, types []string) ([]core.Resour
 				return nil, err
 			}
 			resources = append(resources, buckets...)
+		case ResourceTypeSecurityGroup:
+			sgs, err := p.listSecurityGroups(ctx)
+			if err != nil {
+				return nil, err
+			}
+			resources = append(resources, sgs...)
 		}
 	}
 
