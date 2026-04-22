@@ -2,89 +2,100 @@
 package diff
 
 import (
-	"reflect"
+	"sort"
+	"time"
 
 	"github.com/esanchezm/terradrift/internal/core"
 )
 
-// DriftedResource represents a resource that has drifted from its desired state.
+// DriftedResource represents a resource present in both desired and actual
+// state but whose attributes differ. Changes contains one Change per
+// attribute that diverges between the two sides.
 type DriftedResource struct {
 	Resource core.Resource
 	Changes  []Change
 }
 
-// DriftReport summarizes the differences between the desired and actual state.
+// DriftReport summarizes the differences between the desired and actual
+// state of a set of resources.
 type DriftReport struct {
-	// Managed are resources that are present in both desired and actual state, but might have drifted.
+	// Managed are resources present in both desired and actual state with
+	// no attribute drift detected.
 	Managed []core.Resource
-	// Unmanaged are resources that are present in the actual state but not in the desired state.
+	// Unmanaged are resources present in the actual (cloud) state but not
+	// in the desired (Terraform) state.
 	Unmanaged []core.Resource
-	// Missing are resources that are present in the desired state but not in the actual state.
+	// Missing are resources present in the desired state but not in the
+	// actual state (deleted, never created, or inaccessible to the provider
+	// scan).
 	Missing []core.Resource
-	// Drifted are resources that are present in both but have differences in their attributes.
+	// Drifted are resources present in both sides but with one or more
+	// attribute differences listed in DriftedResource.Changes.
 	Drifted []DriftedResource
+	// Timestamp records when the report was produced. The monotonic clock
+	// reading is stripped (via Round(0)) so the timestamp survives JSON
+	// and other serialization round-trips.
+	Timestamp time.Time
 }
 
-// CalculateDrift compares the desired state and the actual state to produce a DriftReport.
+// CalculateDrift compares desired against actual state using DefaultOptions
+// and returns a DriftReport.
+//
+// This is a thin wrapper around CalculateDriftWithOptions; callers who need
+// to tune matching, normalization, or ephemeral-field filtering should use
+// the options-accepting variant directly.
 func CalculateDrift(desired, actual []core.Resource) DriftReport {
-	report := DriftReport{}
+	return CalculateDriftWithOptions(desired, actual, DefaultOptions())
+}
 
-	desiredMap := make(map[string]core.Resource)
-	for _, r := range desired {
-		desiredMap[r.ID] = r
-	}
+// CalculateDriftWithOptions compares desired and actual resources using the
+// supplied options and returns a DriftReport.
+//
+// Algorithm:
+//
+//  1. matchResources pairs resources using a three-pass strategy (by ID,
+//     then Name, then tags["Name"]). Unpaired desired resources are
+//     classified as Missing; unpaired actual resources as Unmanaged.
+//  2. For each matched pair, diffResources produces attribute-level changes
+//     under an intersection-only key policy with user-configurable
+//     normalization. A pair is Managed when no changes remain and Drifted
+//     otherwise.
+//
+// All report slices (Managed, Unmanaged, Missing, Drifted) are sorted by
+// resource ID so the output is byte-identical across runs for identical
+// input.
+func CalculateDriftWithOptions(desired, actual []core.Resource, opts Options) DriftReport {
+	report := DriftReport{Timestamp: opts.now()}
 
-	actualMap := make(map[string]core.Resource)
-	for _, r := range actual {
-		actualMap[r.ID] = r
-	}
+	pairs, unmatchedDesired, unmatchedActual := matchResources(desired, actual)
 
-	// Check for missing and drifted resources
-	for id, dRes := range desiredMap {
-		if aRes, ok := actualMap[id]; ok {
-			// Resource exists in both. Check for drift.
-			changes := compareResources(dRes, aRes)
-			if len(changes) > 0 {
-				report.Drifted = append(report.Drifted, DriftedResource{
-					Resource: dRes,
-					Changes:  changes,
-				})
-			} else {
-				report.Managed = append(report.Managed, dRes)
-			}
-		} else {
-			// Missing in actual
-			report.Missing = append(report.Missing, dRes)
+	for _, p := range pairs {
+		changes := diffResources(p.Desired, p.Actual, opts)
+		if len(changes) == 0 {
+			report.Managed = append(report.Managed, p.Desired)
+			continue
 		}
+		report.Drifted = append(report.Drifted, DriftedResource{
+			Resource: p.Desired,
+			Changes:  changes,
+		})
 	}
+	report.Missing = unmatchedDesired
+	report.Unmanaged = unmatchedActual
 
-	// Check for unmanaged resources
-	for id, aRes := range actualMap {
-		if _, ok := desiredMap[id]; !ok {
-			report.Unmanaged = append(report.Unmanaged, aRes)
-		}
-	}
+	sortResourcesByID(report.Managed)
+	sortResourcesByID(report.Unmanaged)
+	sortResourcesByID(report.Missing)
+	sort.Slice(report.Drifted, func(i, j int) bool {
+		return report.Drifted[i].Resource.ID < report.Drifted[j].Resource.ID
+	})
 
 	return report
 }
 
-func compareResources(desired, actual core.Resource) []Change {
-	var changes []Change
-
-	// We compare the Data map
-	if !reflect.DeepEqual(desired.Data, actual.Data) {
-		// For simplicity, we'll just say the whole Data map changed if it's not equal.
-		// A more advanced implementation would find specific key differences.
-		changes = append(changes, Change{
-			ResourceID:   desired.ID,
-			ChangeType:   ChangeTypeUpdate,
-			Attribute:    "data",
-			OldValue:     desired.Data,
-			NewValue:     actual.Data,
-			ResourceType: desired.Type,
-			ResourceName: desired.Name,
-		})
-	}
-
-	return changes
+// sortResourcesByID sorts rs in place by ascending Resource.ID.
+func sortResourcesByID(rs []core.Resource) {
+	sort.Slice(rs, func(i, j int) bool {
+		return rs[i].ID < rs[j].ID
+	})
 }
