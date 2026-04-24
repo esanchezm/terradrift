@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/esanchezm/terradrift/internal/core"
+	"github.com/esanchezm/terradrift/internal/ignore"
 )
 
 type fakeStateReader struct {
@@ -261,6 +264,144 @@ func TestProviderSupportsType(t *testing.T) {
 	if providerSupportsType(p, "") {
 		t.Error("providerSupportsType(empty) = true, want false")
 	}
+}
+
+func TestRunScan_IgnorePatterns_FilterUnmanagedAndDrifted(t *testing.T) {
+	reader := &fakeStateReader{
+		resources: []core.Resource{
+			{ID: "i-managed", Type: "aws_instance", Name: "web-managed"},
+			{ID: "i-0xyz789", Type: "aws_instance", Name: "web-1", Data: map[string]interface{}{"instance_type": "t3.medium"}},
+			{ID: "r-admin", Type: "aws_iam_role", Name: "admin", Data: map[string]interface{}{"path": "/"}},
+		},
+		source: "state.tfstate",
+	}
+	prov := &fakeProvider{
+		name:  "aws",
+		types: []string{"aws_instance", "aws_s3_bucket", "aws_security_group", "aws_iam_role"},
+		resources: []core.Resource{
+			{ID: "i-managed", Type: "aws_instance", Name: "web-managed"},
+			{ID: "i-0xyz789", Type: "aws_instance", Name: "web-1", Data: map[string]interface{}{"instance_type": "t3.large"}},
+			{ID: "i-0abc123", Type: "aws_instance", Name: "web-2"},
+			{ID: "r-admin", Type: "aws_iam_role", Name: "admin", Data: map[string]interface{}{"path": "/team/"}},
+		},
+	}
+
+	patterns := writeAndLoadIgnore(t, `# .driftignore
+aws_instance.web-2
+aws_iam_role.*
+`)
+
+	var buf bytes.Buffer
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		Region:       "eu-west-1",
+		NoColor:      true,
+		Out:          &buf,
+		Ignore:       patterns,
+	})
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+
+	out := buf.String()
+
+	mustContain := []string{
+		"Summary: 1 managed, 0 unmanaged, 0 missing, 1 drifted, 2 ignored",
+		`instance_type: "t3.medium" → "t3.large"`,
+	}
+	mustNotContain := []string{
+		"aws_instance.web-2 (i-0abc123) — unmanaged",
+		"aws_iam_role.admin",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Errorf("expected output to contain %q, full output:\n%s", s, out)
+		}
+	}
+	for _, s := range mustNotContain {
+		if strings.Contains(out, s) {
+			t.Errorf("expected output to NOT contain %q (driftignore suppressed), full output:\n%s", s, out)
+		}
+	}
+}
+
+func TestRunScan_NilIgnore_LeavesReportUnchanged(t *testing.T) {
+	reader := &fakeStateReader{
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "web"}},
+		source:    "s.tfstate",
+	}
+	prov := &fakeProvider{
+		name:      "aws",
+		types:     []string{"aws_instance"},
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "web"}, {ID: "i-2", Type: "aws_instance", Name: "rogue"}},
+	}
+
+	var buf bytes.Buffer
+	if err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Quiet:        true,
+		Out:          &buf,
+		Ignore:       nil,
+	}); err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+
+	want := "Summary: 1 managed, 1 unmanaged, 0 missing, 0 drifted\n"
+	if buf.String() != want {
+		t.Errorf("nil Ignore must not change output\n got:  %q\n want: %q", buf.String(), want)
+	}
+}
+
+func TestLoadIgnorePatterns_ExplicitPath_Loads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.driftignore")
+	if err := os.WriteFile(path, []byte("aws_instance.web-1\n"), 0o644); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	p, err := loadIgnorePatterns(path)
+	if err != nil {
+		t.Fatalf("loadIgnorePatterns: %v", err)
+	}
+	if !p.Match("aws_instance.web-1") {
+		t.Errorf("expected pattern loaded from explicit path")
+	}
+}
+
+func TestLoadIgnorePatterns_ExplicitPath_MissingFileErrors(t *testing.T) {
+	_, err := loadIgnorePatterns(filepath.Join(t.TempDir(), "nope"))
+	if err == nil {
+		t.Fatal("expected error for missing --ignore-file path")
+	}
+}
+
+func TestLoadIgnorePatterns_EmptyPath_UsesDiscover(t *testing.T) {
+	p, err := loadIgnorePatterns("")
+	if err != nil {
+		t.Fatalf("loadIgnorePatterns with empty path should not error absent a malformed file: %v", err)
+	}
+	if p == nil {
+		t.Fatal("loadIgnorePatterns with empty path must return non-nil Patterns")
+	}
+}
+
+func writeAndLoadIgnore(t *testing.T, content string) *ignore.Patterns {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".driftignore")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing .driftignore: %v", err)
+	}
+	p, err := ignore.LoadFile(path)
+	if err != nil {
+		t.Fatalf("loading .driftignore: %v", err)
+	}
+	return p
 }
 
 func TestFilterResourcesByType(t *testing.T) {

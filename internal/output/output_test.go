@@ -115,11 +115,45 @@ func TestRender_NoDrift_PrintsCleanMessage(t *testing.T) {
 	if !strings.Contains(got, "No drift detected.") {
 		t.Errorf("expected 'No drift detected.' message, got:\n%s", got)
 	}
+	if strings.Contains(got, "All drift ignored.") {
+		t.Errorf("clean report must not say 'All drift ignored.', got:\n%s", got)
+	}
 	if strings.Contains(got, "~~ Drift detected ~~") {
 		t.Errorf("unexpected drift banner in clean report:\n%s", got)
 	}
 	if !strings.Contains(got, "Summary: 1 managed, 0 unmanaged, 0 missing, 0 drifted") {
 		t.Errorf("expected summary line, got:\n%s", got)
+	}
+}
+
+func TestRender_AllDriftIgnored_ShowsSpecificMessage(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(Options{Writer: &buf, NoColor: true})
+
+	report := &diff.DriftReport{
+		Managed: []core.Resource{
+			{ID: "i-1", Type: "aws_instance", Name: "web"},
+		},
+		Ignored: []core.Resource{
+			{ID: "i-2", Type: "aws_instance", Name: "rogue-1"},
+			{ID: "i-3", Type: "aws_instance", Name: "rogue-2"},
+		},
+	}
+
+	if err := r.Render(sampleInfo(), report); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	got := buf.String()
+
+	if !strings.Contains(got, "All drift ignored.") {
+		t.Errorf("expected 'All drift ignored.' when visible drift is empty but Ignored non-empty, got:\n%s", got)
+	}
+	if strings.Contains(got, "No drift detected.") {
+		t.Errorf("must not say 'No drift detected.' when ignored resources exist, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Summary: 1 managed, 0 unmanaged, 0 missing, 0 drifted, 2 ignored") {
+		t.Errorf("expected summary with ignored count, got:\n%s", got)
 	}
 }
 
@@ -410,6 +444,65 @@ func TestRender_NonEmptyRegion_IncludesRegionSuffix(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "Provider: aws (region: eu-west-1)") {
 		t.Errorf("expected region suffix present, got:\n%s", buf.String())
+	}
+}
+
+func TestRender_IgnoredCount_AppendedToSummary(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(Options{Writer: &buf, NoColor: true})
+
+	report := &diff.DriftReport{
+		Managed: []core.Resource{{ID: "i-m", Type: "aws_instance", Name: "mgd"}},
+		Ignored: []core.Resource{
+			{ID: "i-x", Type: "aws_instance", Name: "ignored-1"},
+			{ID: "i-y", Type: "aws_instance", Name: "ignored-2"},
+			{ID: "i-z", Type: "aws_s3_bucket", Name: "ignored-3"},
+		},
+	}
+
+	if err := r.Render(sampleInfo(), report); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	want := "Summary: 1 managed, 0 unmanaged, 0 missing, 0 drifted, 3 ignored\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("expected summary with ignored count, got:\n%s", buf.String())
+	}
+}
+
+func TestRender_NoIgnored_SummaryUnchanged(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(Options{Writer: &buf, NoColor: true})
+
+	if err := r.Render(sampleInfo(), &diff.DriftReport{}); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "Summary: 0 managed, 0 unmanaged, 0 missing, 0 drifted\n") {
+		t.Errorf("expected base summary without ignored suffix, got:\n%s", got)
+	}
+	if strings.Contains(got, "ignored") {
+		t.Errorf("summary must not mention 'ignored' when Ignored slice is empty, got:\n%s", got)
+	}
+}
+
+func TestRender_QuietMode_IncludesIgnoredInSummary(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(Options{Writer: &buf, NoColor: true, Quiet: true})
+
+	report := &diff.DriftReport{
+		Managed: []core.Resource{{ID: "i-m", Type: "aws_instance", Name: "mgd"}},
+		Ignored: []core.Resource{{ID: "i-x", Type: "aws_instance", Name: "ignored"}},
+	}
+
+	if err := r.Render(sampleInfo(), report); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	want := "Summary: 1 managed, 0 unmanaged, 0 missing, 0 drifted, 1 ignored\n"
+	if buf.String() != want {
+		t.Errorf("quiet summary mismatch:\n got:  %q\n want: %q", buf.String(), want)
 	}
 }
 

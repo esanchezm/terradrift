@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/esanchezm/terradrift/internal/core"
 	"github.com/esanchezm/terradrift/internal/diff"
+	"github.com/esanchezm/terradrift/internal/ignore"
 	"github.com/esanchezm/terradrift/internal/output"
 	"github.com/esanchezm/terradrift/internal/provider"
 	awsprovider "github.com/esanchezm/terradrift/internal/provider/aws"
@@ -17,12 +19,13 @@ import (
 )
 
 var (
-	scanProvider string
-	scanType     string
-	scanRegion   string
-	scanState    string
-	scanNoColor  bool
-	scanQuiet    bool
+	scanProvider   string
+	scanType       string
+	scanRegion     string
+	scanState      string
+	scanNoColor    bool
+	scanQuiet      bool
+	scanIgnoreFile string
 )
 
 // newProviderFn is a package-level indirection through which scanCmd
@@ -55,6 +58,11 @@ line.`,
 			return fmt.Errorf("state source is required (use --state)")
 		}
 
+		patterns, err := loadIgnorePatterns(scanIgnoreFile)
+		if err != nil {
+			return fmt.Errorf("failed to load ignore file: %w", err)
+		}
+
 		ctx := cmd.Context()
 
 		reader, err := factory.NewStateReader(ctx, scanState)
@@ -76,8 +84,24 @@ line.`,
 			NoColor:      scanNoColor,
 			Quiet:        scanQuiet,
 			Out:          cmd.OutOrStdout(),
+			Ignore:       patterns,
 		})
 	},
+}
+
+// loadIgnorePatterns chooses the right source for driftignore patterns:
+// an explicit --ignore-file path (hard error if missing, because the user
+// asked for it) or gitignore-style auto-discovery in CWD then git root
+// (missing file is fine).
+func loadIgnorePatterns(explicitPath string) (*ignore.Patterns, error) {
+	if explicitPath != "" {
+		return ignore.LoadFile(explicitPath)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("resolving working directory: %w", err)
+	}
+	return ignore.Discover(cwd)
 }
 
 // scanConfig bundles the inputs runScan needs. Grouping them in a struct
@@ -92,6 +116,7 @@ type scanConfig struct {
 	NoColor      bool
 	Quiet        bool
 	Out          io.Writer
+	Ignore       *ignore.Patterns
 }
 
 // runScan is the testable core of the scan command. It validates
@@ -127,7 +152,7 @@ func runScan(ctx context.Context, cfg scanConfig) error {
 		return fmt.Errorf("failed to list cloud resources: %w", err)
 	}
 
-	report := diff.CalculateDrift(desired, actual)
+	report := ignore.Apply(diff.CalculateDrift(desired, actual), cfg.Ignore)
 
 	info := output.ScanInfo{
 		Provider:           cfg.ProviderName,
@@ -171,4 +196,5 @@ func init() {
 	scanCmd.Flags().StringVar(&scanState, "state", "", "State source: path to tfstate, s3://bucket/key, http(s):// URL, or - for stdin")
 	scanCmd.Flags().BoolVar(&scanNoColor, "no-color", false, "Disable colored output (implies plain ASCII regardless of TTY)")
 	scanCmd.Flags().BoolVar(&scanQuiet, "quiet", false, "Print only the summary line")
+	scanCmd.Flags().StringVar(&scanIgnoreFile, "ignore-file", "", "Path to a .driftignore file (default: auto-discover .driftignore in the current directory, then the git repository root)")
 }

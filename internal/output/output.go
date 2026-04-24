@@ -187,10 +187,14 @@ func (r *Renderer) writeHeader(info ScanInfo) error {
 // example. Within each category, the order comes straight from the
 // report (which is already ID-sorted by diff.CalculateDrift).
 func (r *Renderer) writeDriftSection(report *diff.DriftReport) error {
-	hasAny := len(report.Unmanaged) > 0 || len(report.Missing) > 0 || len(report.Drifted) > 0
+	hasVisibleDrift := len(report.Unmanaged) > 0 || len(report.Missing) > 0 || len(report.Drifted) > 0
 
-	if !hasAny {
-		if _, err := fmt.Fprintln(r.writer, "No drift detected."); err != nil {
+	if !hasVisibleDrift {
+		msg := "No drift detected."
+		if len(report.Ignored) > 0 {
+			msg = "All drift ignored."
+		}
+		if _, err := fmt.Fprintln(r.writer, msg); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintln(r.writer)
@@ -234,17 +238,22 @@ func (r *Renderer) writeDriftSection(report *diff.DriftReport) error {
 	return err
 }
 
-// writeSummary emits the single "Summary: ..." line. The counts are
-// taken directly from report slice lengths and always rendered, even
-// when every count is zero, so downstream tooling can rely on a
-// well-formed final line.
+// writeSummary emits the single "Summary: ..." line. The four core
+// counts are always rendered, even when zero, so downstream tooling can
+// rely on a well-formed final line. The ", N ignored" suffix is appended
+// only when the report actually has ignored resources so reports from
+// callers that do not use driftignore stay visually unchanged.
 func (r *Renderer) writeSummary(report *diff.DriftReport) error {
-	_, err := fmt.Fprintf(r.writer, "Summary: %d managed, %d unmanaged, %d missing, %d drifted\n",
+	summary := fmt.Sprintf("Summary: %d managed, %d unmanaged, %d missing, %d drifted",
 		len(report.Managed),
 		len(report.Unmanaged),
 		len(report.Missing),
 		len(report.Drifted),
 	)
+	if n := len(report.Ignored); n > 0 {
+		summary += fmt.Sprintf(", %d ignored", n)
+	}
+	_, err := fmt.Fprintln(r.writer, summary)
 	return err
 }
 

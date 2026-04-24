@@ -32,6 +32,12 @@ type DriftReport struct {
 	// Drifted are resources present in both sides but with one or more
 	// attribute differences listed in DriftedResource.Changes.
 	Drifted []DriftedResource
+	// Ignored are resources that would otherwise appear in Unmanaged or
+	// Drifted but were suppressed by a driftignore rule. CalculateDrift
+	// never populates this field; it is written by downstream filtering
+	// (see internal/ignore.Apply) so the pure-comparison output of diff
+	// stays independent of user-configurable suppression.
+	Ignored []core.Resource
 	// Timestamp records when the report was produced. The monotonic clock
 	// reading is stripped (via Round(0)) so the timestamp survives JSON
 	// and other serialization round-trips.
