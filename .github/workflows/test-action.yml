@@ -1,0 +1,105 @@
+name: Test Action
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'action.yml'
+      - 'entrypoint.sh'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test-action.yml'
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'action.yml'
+      - 'entrypoint.sh'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test-action.yml'
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: terradrift-action:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify binary inside image
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/terradrift terradrift-action:test --version
+          docker run --rm --entrypoint /usr/local/bin/terradrift terradrift-action:test scan --help
+
+      - name: Smoke-test entrypoint with missing inputs
+        run: |
+          set +e
+          docker run --rm terradrift-action:test
+          code=$?
+          set -e
+          if [ "$code" -ne 2 ]; then
+            echo "Expected exit code 2 (missing state-path), got $code"
+            exit 1
+          fi
+          echo "Got expected exit code 2 for missing state-path."
+
+  use-action:
+    name: Invoke action via uses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write fixture state
+        run: |
+          mkdir -p tmp-fixtures
+          cp internal/state/local/testdata/valid.tfstate tmp-fixtures/state.tfstate
+
+      - name: Run action (expects exit 2 due to missing AWS creds)
+        id: terradrift
+        continue-on-error: true
+        uses: ./
+        with:
+          provider: aws
+          state-path: tmp-fixtures/state.tfstate
+          region: us-east-1
+          fail-on-drift: true
+          comment-on-pr: false
+
+      - name: Verify outputs were set
+        run: |
+          if [ "${{ steps.terradrift.outputs.exit-code }}" != "2" ]; then
+            echo "Expected outputs.exit-code=2, got '${{ steps.terradrift.outputs.exit-code }}'"
+            exit 1
+          fi
+          if [ "${{ steps.terradrift.outputs.drift-detected }}" != "false" ]; then
+            echo "Expected outputs.drift-detected=false, got '${{ steps.terradrift.outputs.drift-detected }}'"
+            exit 1
+          fi
+          echo "Action outputs verified: exit-code=2, drift-detected=false"
+
+  shellcheck:
+    name: shellcheck entrypoint.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: '.'
+          ignore_paths: 'vendor'

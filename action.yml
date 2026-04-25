@@ -1,0 +1,64 @@
+name: 'terradrift'
+description: 'Detect drift between Terraform state and your cloud infrastructure, with optional PR comment and CI exit codes.'
+author: 'esanchezm'
+
+branding:
+  icon: 'cloud'
+  color: 'orange'
+
+inputs:
+  provider:
+    description: 'Cloud provider (currently: aws).'
+    required: false
+    default: 'aws'
+  state-path:
+    description: 'Path or URI to the Terraform state file. Accepts a local path (relative to the checkout), an s3://bucket/key URI, an http(s):// URL, or - for stdin.'
+    required: true
+  region:
+    description: 'Cloud region (e.g., eu-west-1). Optional; falls back to AWS_REGION / provider defaults when empty.'
+    required: false
+    default: ''
+  type:
+    description: 'Resource type to scope the scan to (e.g., aws_instance). Omit to scan every supported type.'
+    required: false
+    default: ''
+  ignore-file:
+    description: 'Path to a .driftignore file. Defaults to auto-discovery in the checkout root, then the git repository root.'
+    required: false
+    default: ''
+  fail-on-drift:
+    description: 'When true (default), exit 1 if drift is detected so CI gating works. When false, the action always exits 0 on a successful scan; errors still exit 2.'
+    required: false
+    default: 'true'
+  quiet:
+    description: 'Print only the summary line; suppress per-resource detail.'
+    required: false
+    default: 'false'
+  comment-on-pr:
+    description: 'On pull_request events, post the scan result as an issue comment on the PR. Requires pull-requests: write permission. Has no effect on other event types.'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'Token used to post PR comments. Defaults to the workflow-provided GITHUB_TOKEN; supply a custom token if the default permissions are insufficient.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: 'Numeric exit code from the scan: 0 = clean, 1 = drift detected, 2 = error.'
+  drift-detected:
+    description: 'String "true" or "false" indicating whether the scan found unmanaged, missing, or drifted resources.'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.provider }}
+    - ${{ inputs.state-path }}
+    - ${{ inputs.region }}
+    - ${{ inputs.type }}
+    - ${{ inputs.ignore-file }}
+    - ${{ inputs.fail-on-drift }}
+    - ${{ inputs.quiet }}
+    - ${{ inputs.comment-on-pr }}
+    - ${{ inputs.github-token }}

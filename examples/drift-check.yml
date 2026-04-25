@@ -1,0 +1,42 @@
+name: Drift Detection
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  pull_request:
+    paths:
+      - 'terraform/**'
+      - '**/*.tfstate'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  drift:
+    name: terradrift scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Detect drift
+        id: terradrift
+        uses: esanchezm/terradrift@main
+        with:
+          provider: aws
+          state-path: terraform.tfstate
+          region: eu-west-1
+          fail-on-drift: true
+
+      - name: Notify on drift
+        if: steps.terradrift.outputs.drift-detected == 'true'
+        run: echo "Drift detected. Exit code was ${{ steps.terradrift.outputs.exit-code }}."
