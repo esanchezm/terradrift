@@ -11,6 +11,7 @@ import (
 
 	"github.com/esanchezm/terradrift/internal/core"
 	"github.com/esanchezm/terradrift/internal/ignore"
+	"github.com/esanchezm/terradrift/internal/provider"
 )
 
 type fakeStateReader struct {
@@ -402,6 +403,361 @@ func writeAndLoadIgnore(t *testing.T, content string) *ignore.Patterns {
 		t.Fatalf("loading .driftignore: %v", err)
 	}
 	return p
+}
+
+func TestRunScan_ExitOnDrift_UnmanagedPresent_ReturnsDriftError(t *testing.T) {
+	reader := &fakeStateReader{resources: nil, source: "s.tfstate"}
+	prov := &fakeProvider{
+		name:      "aws",
+		types:     []string{"aws_instance"},
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "rogue"}},
+	}
+
+	var buf bytes.Buffer
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &buf,
+		ExitOnDrift:  true,
+	})
+	if err == nil {
+		t.Fatal("expected driftError when unmanaged resources exist and ExitOnDrift is true")
+	}
+
+	var drift *driftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("expected *driftError, got %T: %v", err, err)
+	}
+	if drift.Unmanaged != 1 || drift.Missing != 0 || drift.Drifted != 0 {
+		t.Errorf("counts = (u=%d m=%d d=%d), want (1, 0, 0)", drift.Unmanaged, drift.Missing, drift.Drifted)
+	}
+}
+
+func TestRunScan_ExitOnDrift_MissingPresent_ReturnsDriftError(t *testing.T) {
+	reader := &fakeStateReader{
+		resources: []core.Resource{{ID: "sg-1", Type: "aws_security_group", Name: "legacy"}},
+		source:    "s.tfstate",
+	}
+	prov := &fakeProvider{name: "aws", types: []string{"aws_security_group"}}
+
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &bytes.Buffer{},
+		ExitOnDrift:  true,
+	})
+
+	var drift *driftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("expected *driftError for missing resource, got %T: %v", err, err)
+	}
+	if drift.Missing != 1 {
+		t.Errorf("Missing = %d, want 1", drift.Missing)
+	}
+}
+
+func TestRunScan_ExitOnDrift_DriftedPresent_ReturnsDriftError(t *testing.T) {
+	reader := &fakeStateReader{
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "web", Data: map[string]interface{}{"instance_type": "t3.micro"}}},
+		source:    "s.tfstate",
+	}
+	prov := &fakeProvider{
+		name:      "aws",
+		types:     []string{"aws_instance"},
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "web", Data: map[string]interface{}{"instance_type": "t3.large"}}},
+	}
+
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &bytes.Buffer{},
+		ExitOnDrift:  true,
+	})
+
+	var drift *driftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("expected *driftError for drifted resource, got %T: %v", err, err)
+	}
+	if drift.Drifted != 1 {
+		t.Errorf("Drifted = %d, want 1", drift.Drifted)
+	}
+}
+
+func TestRunScan_ExitOnDriftFalse_DriftPresent_ReturnsNil(t *testing.T) {
+	reader := &fakeStateReader{resources: nil, source: "s.tfstate"}
+	prov := &fakeProvider{
+		name:      "aws",
+		types:     []string{"aws_instance"},
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "rogue"}},
+	}
+
+	var buf bytes.Buffer
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &buf,
+		ExitOnDrift:  false,
+	})
+	if err != nil {
+		t.Fatalf("ExitOnDrift=false must not produce error on drift, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "unmanaged") {
+		t.Errorf("expected drift rendered to stdout even with ExitOnDrift=false, got:\n%s", buf.String())
+	}
+}
+
+func TestRunScan_ExitOnDrift_CleanScan_ReturnsNil(t *testing.T) {
+	shared := []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "web"}}
+	reader := &fakeStateReader{resources: shared, source: "s.tfstate"}
+	prov := &fakeProvider{name: "aws", types: []string{"aws_instance"}, resources: shared}
+
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &bytes.Buffer{},
+		ExitOnDrift:  true,
+	})
+	if err != nil {
+		t.Errorf("clean scan with ExitOnDrift=true must return nil, got: %v", err)
+	}
+}
+
+func TestRunScan_ExitOnDrift_OnlyIgnoredResources_ReturnsNil(t *testing.T) {
+	reader := &fakeStateReader{resources: nil, source: "s.tfstate"}
+	prov := &fakeProvider{
+		name:      "aws",
+		types:     []string{"aws_instance"},
+		resources: []core.Resource{{ID: "i-1", Type: "aws_instance", Name: "rogue"}},
+	}
+
+	patterns := writeAndLoadIgnore(t, "aws_instance.rogue\n")
+
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &bytes.Buffer{},
+		Ignore:       patterns,
+		ExitOnDrift:  true,
+	})
+	if err != nil {
+		t.Errorf("ExitOnDrift must ignore driftignore-suppressed resources, got: %v", err)
+	}
+}
+
+func TestRunScan_ExitOnDrift_AcceptanceCounts(t *testing.T) {
+	reader := &fakeStateReader{
+		resources: []core.Resource{
+			{ID: "sg-legacy", Type: "aws_security_group", Name: "legacy"},
+			{ID: "i-web-1", Type: "aws_instance", Name: "web-1", Data: map[string]interface{}{"instance_type": "t3.medium"}},
+		},
+		source: "s.tfstate",
+	}
+	prov := &fakeProvider{
+		name:  "aws",
+		types: []string{"aws_instance", "aws_security_group"},
+		resources: []core.Resource{
+			{ID: "i-web-1", Type: "aws_instance", Name: "web-1", Data: map[string]interface{}{"instance_type": "t3.large"}},
+			{ID: "i-rogue-1", Type: "aws_instance", Name: "rogue-1"},
+			{ID: "i-rogue-2", Type: "aws_instance", Name: "rogue-2"},
+		},
+	}
+
+	err := runScan(context.Background(), scanConfig{
+		Reader:       reader,
+		Provider:     prov,
+		ProviderName: "aws",
+		NoColor:      true,
+		Out:          &bytes.Buffer{},
+		ExitOnDrift:  true,
+	})
+
+	var drift *driftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("expected driftError, got %T: %v", err, err)
+	}
+	if drift.Unmanaged != 2 || drift.Missing != 1 || drift.Drifted != 1 {
+		t.Errorf("counts = (u=%d m=%d d=%d), want (2, 1, 1)", drift.Unmanaged, drift.Missing, drift.Drifted)
+	}
+
+	stderrCode := handleExitError(err, &bytes.Buffer{})
+	if stderrCode != ExitCodeDrift {
+		t.Errorf("handleExitError code = %d, want %d", stderrCode, ExitCodeDrift)
+	}
+}
+
+func TestExecute_Integration_CleanScan_ExitsZero(t *testing.T) {
+	resetScanFlags(t)
+	tfstate := writeTfstate(t, `{"version":4,"resources":[]}`)
+	original := newProviderFn
+	newProviderFn = func(_ context.Context, _, _ string) (provider.Provider, error) {
+		return &fakeProvider{name: "aws", types: []string{"aws_instance"}, resources: nil}, nil
+	}
+	defer func() { newProviderFn = original }()
+
+	rootCmd.SetArgs([]string{"scan", "--provider", "aws", "--region", "us-east-1", "--state", tfstate, "--no-color"})
+	defer rootCmd.SetArgs(nil)
+
+	code := handleExitError(rootCmd.Execute(), &bytes.Buffer{})
+	if code != ExitCodeClean {
+		t.Errorf("clean scan exit code = %d, want %d", code, ExitCodeClean)
+	}
+}
+
+func TestExecute_Integration_DriftDetected_ExitsOne(t *testing.T) {
+	resetScanFlags(t)
+	tfstate := writeTfstate(t, `{"version":4,"resources":[]}`)
+	original := newProviderFn
+	newProviderFn = func(_ context.Context, _, _ string) (provider.Provider, error) {
+		return &fakeProvider{
+			name:      "aws",
+			types:     []string{"aws_instance"},
+			resources: []core.Resource{{ID: "i-rogue", Type: "aws_instance", Name: "rogue"}},
+		}, nil
+	}
+	defer func() { newProviderFn = original }()
+
+	rootCmd.SetArgs([]string{"scan", "--provider", "aws", "--region", "us-east-1", "--state", tfstate, "--no-color"})
+	defer rootCmd.SetArgs(nil)
+
+	var stderr bytes.Buffer
+	code := handleExitError(rootCmd.Execute(), &stderr)
+
+	if code != ExitCodeDrift {
+		t.Errorf("drift exit code = %d, want %d", code, ExitCodeDrift)
+	}
+	if !strings.Contains(stderr.String(), "drift detected:") {
+		t.Errorf("stderr must contain drift summary, got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "1 unmanaged") {
+		t.Errorf("stderr must reflect counts, got: %q", stderr.String())
+	}
+}
+
+func TestExecute_Integration_DriftDetected_ExitCodeDisabled_ExitsZero(t *testing.T) {
+	resetScanFlags(t)
+	tfstate := writeTfstate(t, `{"version":4,"resources":[]}`)
+	original := newProviderFn
+	newProviderFn = func(_ context.Context, _, _ string) (provider.Provider, error) {
+		return &fakeProvider{
+			name:      "aws",
+			types:     []string{"aws_instance"},
+			resources: []core.Resource{{ID: "i-rogue", Type: "aws_instance", Name: "rogue"}},
+		}, nil
+	}
+	defer func() { newProviderFn = original }()
+
+	rootCmd.SetArgs([]string{"scan", "--provider", "aws", "--region", "us-east-1", "--state", tfstate, "--no-color", "--exit-code=false"})
+	defer rootCmd.SetArgs(nil)
+
+	var stderr bytes.Buffer
+	code := handleExitError(rootCmd.Execute(), &stderr)
+
+	if code != ExitCodeClean {
+		t.Errorf("--exit-code=false on drift must return %d (reported, not failed), got %d", ExitCodeClean, code)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr must be empty when --exit-code=false, got: %q", stderr.String())
+	}
+}
+
+func TestExecute_Integration_MissingProvider_ExitsTwo(t *testing.T) {
+	resetScanFlags(t)
+	rootCmd.SetArgs([]string{"scan"})
+	defer rootCmd.SetArgs(nil)
+
+	var stderr bytes.Buffer
+	code := handleExitError(rootCmd.Execute(), &stderr)
+
+	if code != ExitCodeError {
+		t.Errorf("missing --provider exit code = %d, want %d", code, ExitCodeError)
+	}
+	if !strings.Contains(stderr.String(), "provider is required") {
+		t.Errorf("stderr must mention missing provider, got: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Usage:") {
+		t.Errorf("stderr must not spam usage (SilenceUsage=true), got: %q", stderr.String())
+	}
+}
+
+func TestExecute_Integration_UnknownSubcommand_ExitsTwo_NoUsageSpam(t *testing.T) {
+	resetScanFlags(t)
+	rootCmd.SetArgs([]string{"definitely-not-a-command"})
+	defer rootCmd.SetArgs(nil)
+
+	var stderr bytes.Buffer
+	code := handleExitError(rootCmd.Execute(), &stderr)
+
+	if code != ExitCodeError {
+		t.Errorf("unknown command exit code = %d, want %d", code, ExitCodeError)
+	}
+	if strings.Contains(stderr.String(), "Usage:") {
+		t.Errorf("rootCmd must silence usage on unknown command, got: %q", stderr.String())
+	}
+	errPrefixCount := strings.Count(stderr.String(), "Error:")
+	if errPrefixCount != 1 {
+		t.Errorf("expected exactly one 'Error:' prefix (handleExitError owns stderr), got %d in: %q",
+			errPrefixCount, stderr.String())
+	}
+}
+
+func TestExecute_Integration_UnknownRootFlag_ExitsTwo_NoUsageSpam(t *testing.T) {
+	resetScanFlags(t)
+	rootCmd.SetArgs([]string{"--definitely-not-a-flag"})
+	defer rootCmd.SetArgs(nil)
+
+	var stderr bytes.Buffer
+	code := handleExitError(rootCmd.Execute(), &stderr)
+
+	if code != ExitCodeError {
+		t.Errorf("unknown flag exit code = %d, want %d", code, ExitCodeError)
+	}
+	if strings.Contains(stderr.String(), "Usage:") {
+		t.Errorf("rootCmd must silence usage on unknown flag, got: %q", stderr.String())
+	}
+	errPrefixCount := strings.Count(stderr.String(), "Error:")
+	if errPrefixCount != 1 {
+		t.Errorf("expected exactly one 'Error:' prefix, got %d in: %q",
+			errPrefixCount, stderr.String())
+	}
+}
+
+func writeTfstate(t *testing.T, contents string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "terraform.tfstate")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("writing tfstate: %v", err)
+	}
+	return path
+}
+
+// resetScanFlags clears every package-level scan flag variable so an
+// integration test starts with a known baseline. Cobra binds flags to
+// these vars at init time and never zeroes them between Execute calls,
+// which would otherwise leak state across tests in this file (a missing
+// --provider would silently inherit the value set by the previous test).
+func resetScanFlags(t *testing.T) {
+	t.Helper()
+	scanProvider = ""
+	scanType = ""
+	scanRegion = ""
+	scanState = ""
+	scanNoColor = false
+	scanQuiet = false
+	scanIgnoreFile = ""
+	scanExitCode = true
 }
 
 func TestFilterResourcesByType(t *testing.T) {

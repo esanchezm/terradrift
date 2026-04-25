@@ -26,6 +26,7 @@ var (
 	scanNoColor    bool
 	scanQuiet      bool
 	scanIgnoreFile string
+	scanExitCode   bool
 )
 
 // newProviderFn is a package-level indirection through which scanCmd
@@ -49,7 +50,17 @@ This command loads Terraform state from the source given by --state, lists the
 resources in the cloud via --provider / --region, and prints a
 terraform-plan-style diff of the two. Output is colored by default; pass
 --no-color for plain text or --quiet to suppress everything except the summary
-line.`,
+line.
+
+Exit codes (when --exit-code is enabled, the default):
+  0  clean scan, no drift detected
+  1  drift detected (unmanaged, missing, or drifted resources)
+  2  scan could not complete (bad arguments, state read failure, provider error)
+
+Pass --exit-code=false to always exit 0 on a successful scan regardless of
+drift; errors still exit 2.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if scanProvider == "" {
 			return fmt.Errorf("provider is required (use --provider)")
@@ -85,6 +96,7 @@ line.`,
 			Quiet:        scanQuiet,
 			Out:          cmd.OutOrStdout(),
 			Ignore:       patterns,
+			ExitOnDrift:  scanExitCode,
 		})
 	},
 }
@@ -117,6 +129,7 @@ type scanConfig struct {
 	Quiet        bool
 	Out          io.Writer
 	Ignore       *ignore.Patterns
+	ExitOnDrift  bool
 }
 
 // runScan is the testable core of the scan command. It validates
@@ -165,7 +178,27 @@ func runScan(ctx context.Context, cfg scanConfig) error {
 		NoColor: cfg.NoColor,
 		Quiet:   cfg.Quiet,
 	})
-	return renderer.Render(info, &report)
+	if err := renderer.Render(info, &report); err != nil {
+		return err
+	}
+
+	if cfg.ExitOnDrift && reportHasDrift(&report) {
+		return &driftError{
+			Unmanaged: len(report.Unmanaged),
+			Missing:   len(report.Missing),
+			Drifted:   len(report.Drifted),
+		}
+	}
+	return nil
+}
+
+// reportHasDrift reports whether the rendered report contains
+// user-actionable drift. Ignored resources are deliberately not
+// counted: the user has already asserted they are fine, so returning
+// non-zero exit because of them would make --ignore-file useless for
+// CI gating.
+func reportHasDrift(report *diff.DriftReport) bool {
+	return len(report.Unmanaged) > 0 || len(report.Missing) > 0 || len(report.Drifted) > 0
 }
 
 func providerSupportsType(p provider.Provider, t string) bool {
@@ -197,4 +230,5 @@ func init() {
 	scanCmd.Flags().BoolVar(&scanNoColor, "no-color", false, "Disable colored output (implies plain ASCII regardless of TTY)")
 	scanCmd.Flags().BoolVar(&scanQuiet, "quiet", false, "Print only the summary line")
 	scanCmd.Flags().StringVar(&scanIgnoreFile, "ignore-file", "", "Path to a .driftignore file (default: auto-discover .driftignore in the current directory, then the git repository root)")
+	scanCmd.Flags().BoolVar(&scanExitCode, "exit-code", true, "Exit 1 when drift is detected (0/1/2 exit codes for CI pipelines). Pass --exit-code=false to always exit 0 on a successful scan.")
 }
